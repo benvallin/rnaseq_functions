@@ -846,3 +846,28 @@ plot_ora_results <- function(ora_df, category, title) {
     labs(x = NULL, y = NULL, title = title, fill = "adj p")
   
 }
+
+# summarise_average_transcript_length() -------------------------------------------------------------------------
+
+summarise_average_transcript_length <- function(average_transcript_length_matrix,
+                                                barcode_summary_variable_cell_type,
+                                                cell_type,
+                                                summary_variable) {
+  
+  # Subset the list of barcodes to only the cell type of interest
+  filtered <- barcode_summary_variable_cell_type[barcode_summary_variable_cell_type$cell_type == cell_type,]
+
+  # Summarize the average transcript length matrix to summary variable-level
+  # => Compute the average transcript length per combination of gene and summary variable level
+  out <- average_transcript_length_matrix %>% 
+    select(filtered$barcode) %>% 
+    rownames_to_column(var="ensembl_gene_id_version") %>% 
+    pivot_longer(cols=-ensembl_gene_id_version, names_to = "barcode", values_to = "length") %>% 
+    left_join(filtered, by = join_by(barcode)) %>% 
+    nest(data = -c(all_of(summary_variable), ensembl_gene_id_version)) %>% 
+    mutate(mean_length = map_dbl(.x = data,
+                                 .f = ~ mean(.x$length))) %>% 
+    select(-data) %>% 
+    pivot_wider(names_from = all_of(summary_variable), values_from = mean_length)
+  
+}
