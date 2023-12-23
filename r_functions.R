@@ -3,33 +3,75 @@ library(ggpubr)
 
 # plot_gene_count() -------------------------------------------------------
 
-# => Plots n counts by genotype and treatment for a given transcript
+# => Plots n counts by genotype and treatment (or exposition) for a given transcript
 # => Uses DESeq2::plotCounts() which normalizes counts by the estimated size factors and adds a pseudocount of 1/2 to allow for log scale plotting
 plot_gene_count <- function(dds, 
                             res,
                             gene_metadata, 
                             dds_gene_id_type = "ensembl_gene_id_version", 
                             user_gene_id_type = "gene_name", 
-                            gene) {
+                            gene,
+                            dataset = "pff",
+                            pr = F) {
   
   dds_gene <- gene_metadata[gene_metadata[[user_gene_id_type]] == gene, dds_gene_id_type][1,][[1]]
   
-  ggplot(data = DESeq2::plotCounts(dds = dds, 
-                                   gene = which(res@rownames == dds_gene),
-                                   intgroup = c("genotype", "treatment", "line_name"),
-                                   returnData = T) %>% 
-           dplyr::mutate(genotype_treatment = paste0(genotype, " ", treatment)),
-         mapping = aes(x = genotype_treatment, y = count, fill = line_name)) +
-    geom_line(aes(group = line_name), color = "orange", linetype = "dashed") +
-    geom_point(position = position_dodge(width = 0.2), size = 6, shape = 21) +
-    theme_pubr(legend = "right") +
-    scale_fill_manual(values = c("#00b4d8", "#0096c7", "#0077b6", "#ff4d6d", "#c9184a", "#a4133c", "#29a655")) +
-    # scale_fill_manual(values = c("#00b4d8", "#0096c7", "#0077b6", "#ff4d6d", "#c9184a", "#a4133c", "#d3d3d3")) +
-    scale_y_log10(n.breaks = 10) +
-    rotate_x_text(45) +
-    labs(x = " genotype / treatment",
-         y = paste0(gene, " normalized count"),
-         fill = "line ID")
+  if(dataset == "pff") {
+    
+    p <- ggplot(data = DESeq2::plotCounts(dds = dds, 
+                                          gene = which(res@rownames == dds_gene),
+                                          intgroup = c("genotype", "treatment", "line_name"),
+                                          returnData = T) %>% 
+                  dplyr::mutate(genotype_treatment = paste0(genotype, " ", treatment)),
+                mapping = aes(x = genotype_treatment, y = count, fill = line_name))
+    
+    if(isFALSE(pr)) {
+      p <- p +
+        geom_line(aes(group = line_name), color = "orange", linetype = "dashed") 
+    }
+    p <- p +
+      geom_point(position = position_dodge(width = 0.2), size = 6, shape = 21) +
+      theme_pubr(legend = "right") +
+      scale_fill_manual(values = c("#00b4d8", "#0096c7", "#0077b6", "#ff4d6d", "#c9184a", "#a4133c", "#29a655")) +
+      scale_y_log10(n.breaks = 10) +
+      rotate_x_text(45) +
+      labs(x = " genotype / treatment",
+           y = paste0(gene, " normalized count"),
+           fill = "line ID")
+    
+  } else if(dataset == "coculture") {
+    
+    p <-  ggplot(data = DESeq2::plotCounts(dds = dds, 
+                                           gene = which(res@rownames == dds_gene),
+                                           intgroup = c("genotype", "exposition", "line_name"),
+                                           returnData = T) %>%
+                   dplyr::mutate(genotype_exposition = paste0(genotype, " ", exposition),
+                                 order = case_when(genotype_exposition == "CTRL unexposed" ~ 1L, 
+                                                   genotype_exposition == "CTRL TRIP-exposed" ~ 2L, 
+                                                   genotype_exposition == "KO unexposed" ~ 3L, 
+                                                   genotype_exposition == "KO TRIP-exposed" ~ 4L,
+                                                   genotype_exposition == "TRIP-exposed" ~ 5L,
+                                                   TRUE ~ NA_integer_),
+                                 genotype_exposition = reorder(genotype_exposition, order)),
+                 mapping = aes(x = genotype_exposition,
+                               y = count, 
+                               fill = line_name))
+    if(isFALSE(pr)) {
+      p <- p +
+        geom_line(aes(group = line_name), color = "orange", linetype = "dashed") 
+    }
+    p <- p +
+      geom_point(position = position_dodge(width = 0.2), size = 6, shape = 21) +
+      theme_pubr(legend = "right") +
+      scale_fill_manual(values = c("#00b4d8", "#0096c7", "#0077b6", "#29a655", "#a4133c")) +
+      scale_y_log10(n.breaks = 10) +
+      rotate_x_text(45) +
+      labs(x = " genotype / exposition",
+           y = paste0(gene, " normalized count"),
+           fill = "line ID")
+    
+  }
+  p
 }
 
 # compute_dge() -------------------------------------------------------------------------
@@ -415,7 +457,7 @@ batch_ensembl_gene_id_annotations <- function(res_df,
            
            # From gene_metadata, filter those genes that:
            # - are detected in the dataset res_df
-           # - have non-null annotation for the current annotation database
+           # - have non-null annotation for the current annotation category
            as_tibble(gene_metadata) %>% 
              dplyr::filter(ensembl_gene_id %in% res_df$ensembl_gene_id) %>% 
              dplyr::select(ensembl_gene_id, all_of(x)) %>% 
@@ -439,7 +481,7 @@ batch_ora_fgsea <- function(test_gene_set,
          FUN = function(x) {
            
            # Define pathways
-           # => All the annotations in the current annotation database that match one or more detected genes
+           # => All the annotations in the current annotation category that match one or more detected genes
            pathways_table <- ensembl_gene_id_annotations[[x]] %>% 
              nest(data = ensembl_gene_id) %>% 
              dplyr::mutate(data = map(.x = data, .f = ~.x$ensembl_gene_id))
@@ -448,13 +490,13 @@ batch_ora_fgsea <- function(test_gene_set,
                                         nm = pathways_table[["set_id"]]))
            
            # Define set of genes to test
-           # => Genes in test_gene_set that have non-null annotation for the current annotation database
+           # => Genes in test_gene_set that have non-null annotation for the current annotation category
            genes <- test_gene_set %>% 
              dplyr::filter(!map_lgl(.x = eval(sym(x)), .f = is.null)) %>% 
              pull(ensembl_gene_id)
            
            # Define universe
-           # => All detected genes that have non-null annotation for the current annotation database
+           # => All detected genes that have non-null annotation for the current annotation category
            universe <- unique(ensembl_gene_id_annotations[[x]]$ensembl_gene_id)
            
            # Run fgsea::fora()
@@ -499,18 +541,18 @@ batch_ora_clusterprofiler <- function(test_gene_set,
                 FUN = function(x) {
                   
                   # Define set of genes to test
-                  # => Genes in test_gene_set that have non-null annotation for the current annotation database
+                  # => Genes in test_gene_set that have non-null annotation for the current annotation category
                   gene <- test_gene_set %>% 
                     dplyr::filter(!map_lgl(.x = eval(sym(x)), .f = is.null)) %>% 
                     pull(ensembl_gene_id)
                   
                   # Define universe
-                  # => All detected genes that have non-null annotation for the current annotation database
+                  # => All detected genes that have non-null annotation for the current annotation category
                   universe <- unique(ensembl_gene_id_annotations[[x]]$ensembl_gene_id)
                   
                   # Define TERM2GENE and TERM2NAME
                   # => Tables providing gene and annotation information only for the detected genes 
-                  # which have non-null annotation for the current annotation database
+                  # which have non-null annotation for the current annotation category
                   # => TERM2GENE: column 1 = annotation term ID and column 2 = matching gene
                   TERM2GENE <- ensembl_gene_id_annotations[[x]][, c("set_id", "ensembl_gene_id")]
                   # => TERM2NAME: column 1 = annotation term ID and column 2 = annotation term name / description
@@ -561,7 +603,7 @@ batch_ora_goseq <- function(test_gene_set,
            
            # Define DEgenes
            # => Named vector of detected genes (0 = not DEG; 1 = DEG; names = ensembl_gene_id)
-           # => Restricted to the detected genes that have non-null annotation for the current annotation database
+           # => Restricted to the detected genes that have non-null annotation for the current annotation category
            DEgenes <- res_df %>% 
              dplyr::filter(!map_lgl(.x = eval(sym(x)), .f = is.null)) %>%
              pull(ensembl_gene_id)
@@ -572,7 +614,7 @@ batch_ora_goseq <- function(test_gene_set,
            DEgenes <- DEgenes[order(names(DEgenes))]
            
            # Refine transcript_length
-           # => Restrict to the detected genes that have non-null annotation for the current annotation database
+           # => Restrict to the detected genes that have non-null annotation for the current annotation category
            annotation_specific_transcript_length <- transcript_length[names(transcript_length) %in% names(DEgenes)]
            
            # Compute the probability weighting function for the set of detected genes based on the median transcript length
@@ -581,7 +623,7 @@ batch_ora_goseq <- function(test_gene_set,
            
            # Define gene2cat
            # => List providing gene and annotation information only for the detected genes 
-           # which have non-null annotation for the current annotation database
+           # which have non-null annotation for the current annotation category
            # => Each entry is an annotation term ID with name = matching ensembl_gene_id
            gene2cat <- as.list(setNames(object = ensembl_gene_id_annotations[[x]][["set_id"]],
                                         nm = ensembl_gene_id_annotations[[x]][["ensembl_gene_id"]]))
@@ -662,7 +704,7 @@ batch_gsea_fgsea <- function(ranked_genes,
          FUN = function(x) {
            
            # Define pathways
-           # => All the annotations in the current annotation database that match one or more detected genes
+           # => All the annotations in the current annotation category that match one or more detected genes
            pathways_table <- ensembl_gene_id_annotations[[x]] %>% 
              nest(data = ensembl_gene_id) %>% 
              dplyr::mutate(data = map(.x = data, .f = ~.x$ensembl_gene_id))
@@ -707,7 +749,7 @@ batch_gsea_clusterprofiler <- function(ranked_genes,
                   
                   # Define TERM2GENE and TERM2NAME
                   # => Tables providing gene and annotation information only for the detected genes 
-                  # which have non-null annotation for the current annotation database
+                  # which have non-null annotation for the current annotation category
                   # => TERM2GENE: column 1 = annotation term ID and column 2 = matching gene
                   TERM2GENE <- ensembl_gene_id_annotations[[x]][, c("set_id", "ensembl_gene_id")]
                   # => TERM2NAME: column 1 = annotation term ID and column 2 = annotation term name / description
@@ -869,5 +911,35 @@ summarise_average_transcript_length <- function(average_transcript_length_matrix
                                  .f = ~ mean(.x$length))) %>% 
     select(-data) %>% 
     pivot_wider(names_from = all_of(summary_variable), values_from = mean_length)
+  
+}
+
+# intersect_deg() ---------------------------------------------------------
+
+intersect_deg <- function(deg_set1, deg_set2) {
+  
+  deg_set1_nm <- as.character(substitute(deg_set1))
+  deg_set2_nm <- as.character(substitute(deg_set2))
+  
+  deg_set1 <- if(is.data.frame(deg_set1)) { deg_set1$gene_name } else { deg_set1 }
+  deg_set2 <- if(is.data.frame(deg_set2)) { deg_set2$gene_name } else { deg_set2 }
+  
+  n_deg_set1 <- length(deg_set1)
+  n_deg_set1_in_set2 <- sum(deg_set1 %in% deg_set2)
+  
+  n_deg_set2 <- length(deg_set2)
+  n_deg_set2_in_set1 <- sum(deg_set2 %in% deg_set1)
+  
+  n_deg_set1_set2 <- length(union(deg_set1, deg_set2))
+  intersecting_deg <- intersect(deg_set1, deg_set2)
+  n_intersecting_deg <- length(intersecting_deg)
+  
+  message("DEG set 1: ", deg_set1_nm, "\n",
+          "DEG set 2: ", deg_set2_nm, "\n",
+          "n DEG set 1 in set 2: ", n_deg_set1_in_set2, "/", n_deg_set1, " (", round(n_deg_set1_in_set2/n_deg_set1*100, 1), "%)\n",
+          "n DEG set 2 in set 1: ", n_deg_set2_in_set1, "/", n_deg_set2, " (", round(n_deg_set2_in_set1/n_deg_set2*100, 1), "%)\n",
+          "n intersecting DEG: ", n_intersecting_deg, "/", n_deg_set1_set2, " (", round(n_intersecting_deg/n_deg_set1_set2*100, 1), "%)\n")
+  
+  return(intersecting_deg)
   
 }
