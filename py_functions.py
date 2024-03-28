@@ -30,7 +30,8 @@ def find_top_expressing_cells(adata, gene_name: str, top_pct: int):
     adata.obs["top"+str(top_pct)+"pct_"+gene_name+"_expressing"] = top_pct_expressing
     adata.uns["top"+str(top_pct)+"pct_"+gene_name+"_expressing_colors"] = ["#907ad6"]
 
-
+# %% find_top_expressing_cells() ----
+    
 def find_least_expressing_cells(adata, gene_name: str, least_pct: int):
   
   if gene_name not in list(adata.var["gene_name"]):
