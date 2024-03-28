@@ -194,7 +194,10 @@ batch_limma_gsea <- function(y,
   
   message("Performing ", limma_test, " test...")
   
-  limma_test <- eval(sym(limma_test))
+  # limma_test <- eval(sym(limma_test))
+  # limma_test <- sym(eval(limma_test))
+  # limma_test <- sym(limma_test)
+  
   
   collections <- batch_ids2indices(gene_metadata = gene_metadata,
                                    collections_names = collections_names,
@@ -207,23 +210,33 @@ batch_limma_gsea <- function(y,
                      sets <- sets[map_lgl(.x = sets, .f = ~ length(.x) >= min_set_size)]
                      sets <- sets[map_lgl(.x = sets, .f = ~ length(.x) <= max_set_size)]
                      
-                     out_i <- limma_test(y = y,
-                                         index = sets,
-                                         design = design,
-                                         contrast = contrast,
-                                         ...)
-                     
-                     out_i <- rownames_to_column(out_i, var = "set_name") %>%
-                       as_tibble() %>%
-                       mutate(collection = x) %>%
-                       select(collection, set_name, everything()) 
-                     
-                     if("FDR" %in% colnames(out_i)) {
-                       out_i <- out_i %>% 
-                         filter(FDR < padj_threshold) %>%
-                         arrange(desc(Direction), FDR)
+                     if(length(sets) == 0) {
+                       NULL
+                     } else {
+                       # out_i <- limma_test(y = y,
+                       #                     index = sets,
+                       #                     design = design,
+                       #                     contrast = contrast,
+                       #                     ...)
+                       
+                       out_i <- do.call(what = limma_test,
+                                        args = list(y = y,
+                                                    index = sets,
+                                                    design = design,
+                                                    contrast = contrast,
+                                                    ...))
+                       
+                       out_i <- rownames_to_column(out_i, var = "set_name") %>%
+                         as_tibble() %>%
+                         mutate(collection = x) %>%
+                         select(collection, set_name, everything()) 
+                       
+                       if("FDR" %in% colnames(out_i)) {
+                         out_i <- out_i %>% 
+                           filter(FDR < padj_threshold) %>%
+                           arrange(desc(Direction), FDR)
+                       }
                      }
-                     
                    }) %>% bind_rows()
 }
 
