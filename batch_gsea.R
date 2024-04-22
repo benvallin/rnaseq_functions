@@ -496,8 +496,6 @@ plot_genes_prop_in_leading_edges <- function(fgsea_df,
          fill = NULL)
 }
 
-
-
 # plot_lfc() --------------------------------------------------------------
 
 plot_lfc <- function(lfc_df,
@@ -511,7 +509,6 @@ plot_lfc <- function(lfc_df,
                      xintercept = NULL,
                      input_pkg = "MAST") {
   
-  
   if(input_pkg == "MAST") {
     
     lfc <- sym("log2fc")
@@ -523,7 +520,6 @@ plot_lfc <- function(lfc_df,
     fdr <- sym("padj")
     
   }
-  
   
   lfc_df <- lfc_df %>% 
     filter(ensembl_gene_id_version %in% genes,
@@ -580,3 +576,87 @@ plot_lfc <- function(lfc_df,
       guides(fill = guide_legend(override.aes = list(shape = 22, size = 5)))
   }
 }
+
+# plot_pct_exp() ----------------------------------------------------------
+
+plot_pct_exp <- function(lfc_df, 
+                         genes, 
+                         ref_cond, 
+                         test_cond, 
+                         title, 
+                         fill_colors = c("#ca3767", "#5d76cb"), 
+                         input_pkg = "MAST") {
+  
+  if(input_pkg == "MAST") {
+    
+    lfc <- sym("log2fc")
+    
+  } else if(input_pkg == "DESeq2") {
+    
+    lfc <- sym("log2FoldChange")
+    
+  }
+  
+  pct_exp_df <- lfc_df %>% 
+    filter(ensembl_gene_id_version %in% genes, !is.na(eval(lfc))) 
+  
+  pct_exp_df <- pct_exp_df %>% 
+    mutate(gene_name = fct_relevel(gene_name, 
+                                   pct_exp_df %>% arrange(eval(lfc)) %>% pull(gene_name)),
+           reference = 100,
+           test = (2^eval(lfc))*100) %>% 
+    select(ensembl_gene_id_version, gene_name, reference, test) %>% 
+    pivot_longer(cols = c(reference, test), 
+                 names_to = "condition", 
+                 values_to = "pct_expression") %>% 
+    mutate(condition = case_when(condition == "reference" ~ ref_cond,
+                                 condition == "test" ~ test_cond,
+                                 T ~ NA_character_))
+  
+  if(mean(pct_exp_df$pct_expression) < 100) {
+    out <- ggplot() +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == ref_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == test_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +  
+      scale_y_continuous(limits = c(0L, 100L), n.breaks = 10L) 
+  } else {
+    out <- ggplot() +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == test_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == ref_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +
+      scale_y_continuous(limits = c(0L, ceiling(max(pct_exp_df$pct_expression))), n.breaks = 12L) 
+  }
+  
+  out <- out +
+    ggpubr::theme_pubr(legend = "bottom") +
+    scale_color_manual(values = fill_colors, aesthetics = "fill") +
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 14),
+          legend.text = element_text(size = 14),
+          legend.title = element_blank()) +
+    ggpubr::rotate_x_text(angle = 30) +
+    labs(x = NULL,
+         y = "% expression",
+         title = title)
+  
+  out
+}
+
