@@ -194,11 +194,6 @@ batch_limma_gsea <- function(y,
   
   message("Performing ", limma_test, " test...")
   
-  # limma_test <- eval(sym(limma_test))
-  # limma_test <- sym(eval(limma_test))
-  # limma_test <- sym(limma_test)
-  
-  
   collections <- batch_ids2indices(gene_metadata = gene_metadata,
                                    collections_names = collections_names,
                                    identifiers = rownames(y))
@@ -213,12 +208,6 @@ batch_limma_gsea <- function(y,
                      if(length(sets) == 0) {
                        NULL
                      } else {
-                       # out_i <- limma_test(y = y,
-                       #                     index = sets,
-                       #                     design = design,
-                       #                     contrast = contrast,
-                       #                     ...)
-                       
                        out_i <- do.call(what = limma_test,
                                         args = list(y = y,
                                                     index = sets,
@@ -469,7 +458,7 @@ plot_genes_prop_in_leading_edges <- function(fgsea_df,
   
   out_df <- out_df %>% 
     mutate(collection = fct_relevel(collection, collection_levels))
-
+  
   collection_colors <- unique(out_df[, c("collection", "collection_color")])
   
   collection_colors <- collection_colors[match(x = collection_levels, 
@@ -509,3 +498,85 @@ plot_genes_prop_in_leading_edges <- function(fgsea_df,
 
 
 
+# plot_lfc() --------------------------------------------------------------
+
+plot_lfc <- function(lfc_df,
+                     genes,
+                     key_genes = NULL,
+                     title = NULL,
+                     test_cond = "PFF",
+                     ref_cond = "NT",
+                     key_genes_name = "leading edge",
+                     desc_lfc = T,
+                     xintercept = NULL,
+                     input_pkg = "MAST") {
+  
+  
+  if(input_pkg == "MAST") {
+    
+    lfc <- sym("log2fc")
+    fdr <- sym("fdr")
+    
+  } else if(input_pkg == "DESeq2") {
+    
+    lfc <- sym("log2FoldChange")
+    fdr <- sym("padj")
+    
+  }
+  
+  
+  lfc_df <- lfc_df %>% 
+    filter(ensembl_gene_id_version %in% genes,
+           !is.na(eval(lfc))) %>% 
+    mutate(fdr_value = case_when(eval(fdr) < 0.01 ~ "FDR < 0.01",
+                                 eval(fdr) < 0.05 ~ "FDR < 0.05", 
+                                 T ~ paste0("FDR ", utf8::utf8_print("\u2265"), " 0.05")),
+           fdr_color = case_when(eval(fdr) < 0.01 ~ "#e0007f",
+                                 eval(fdr) < 0.05 ~ "#b892ff", 
+                                 T ~ "#ff9100")) 
+  
+  if(!is.null(key_genes)) {
+    lfc_df <- lfc_df %>% 
+      mutate(in_key_genes = ifelse(ensembl_gene_id_version %in% key_genes, 
+                                   paste0("in ", key_genes_name),
+                                   paste0("not in ", key_genes_name)))
+  }
+  
+  out <- ggplot(data = lfc_df,
+                mapping = aes(x = eval(lfc),
+                              y = fct_reorder(gene_name, eval(lfc), .desc = desc_lfc),
+                              fill = fdr_value)) +
+    geom_hline(yintercept = lfc_df$gene_name,
+               color = "grey", alpha = 0.2) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "#c9184a", linewidth = 0.5) +
+    geom_vline(xintercept = xintercept, linetype = "dashed", color = "orange", linewidth = 0.5) +
+    ggpubr::theme_pubr(legend = "bottom") +
+    theme(axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          legend.text = element_text(size = 14),
+          strip.text.x = element_text(size = 14)) +
+    scale_fill_manual(values = lfc_df %>% arrange(eval(fdr)) %>% pull(fdr_color) %>% unique()) +
+    labs(title = title,
+         x = paste0("log", utf8::utf8_print("\u2082"), " fold change (", test_cond, " vs ", ref_cond, ")"),
+         y = NULL,
+         fill = NULL,
+         shape = NULL)
+  
+  if(is.null(key_genes)) {
+    out +
+      geom_point(shape = 21, color = "black", size = 5, stroke = 1)
+  } else {
+    if(length(unique(lfc_df$in_key_genes)) == 2) {
+      shapes <- c(23, 21)
+    } else if(unique(lfc_df$in_key_genes) == paste0("in ", key_genes_name)) {
+      shapes <- 23
+    } else {
+      shapes <- 21
+    }
+    out +
+      geom_point(aes(shape = in_key_genes), color = "black", size = 5, stroke = 1) +
+      scale_shape_manual(values = shapes) +
+      guides(fill = guide_legend(override.aes = list(shape = 22, size = 5)))
+  }
+}
