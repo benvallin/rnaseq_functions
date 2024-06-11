@@ -1,5 +1,8 @@
 library(tidyverse)
 library(ggpubr)
+library(fgsea)
+library(MAST)
+library(limma)
 
 # plot_gene_count() -------------------------------------------------------
 
@@ -476,7 +479,7 @@ summarise_average_transcript_length <- function(average_transcript_length_matrix
   
   # Subset the list of barcodes to only the cell type of interest
   filtered <- barcode_summary_variable_cell_type[barcode_summary_variable_cell_type$cell_type == cell_type,]
-
+  
   # Summarize the average transcript length matrix to summary variable-level
   # => Compute the average transcript length per combination of gene and summary variable level
   out <- average_transcript_length_matrix %>% 
@@ -521,3 +524,939 @@ intersect_deg <- function(deg_set1, deg_set2) {
   return(intersecting_deg)
   
 }
+
+
+# make_fgsea_pathways() ---------------------------------------------------
+
+make_fgsea_pathways <- function(gene_metadata,
+                                collections_names) {
+  
+  output <- lapply(X = collections_names,
+                   FUN = function(x) {
+                     
+                     out_i <- as_tibble(gene_metadata) %>% 
+                       select(ensembl_gene_id_version, all_of(x)) %>% 
+                       unnest(all_of(x), keep_empty = F) %>% 
+                       nest(data = ensembl_gene_id_version) %>% 
+                       mutate(data = map(.x = data, .f = ~.x$ensembl_gene_id_version))
+                     
+                     out_i <- as.list(setNames(object = out_i[["data"]], nm = out_i[["set_name"]]))
+                     
+                   }) %>% setNames(nm = collections_names)
+}
+
+# batch_fgsea() -----------------------------------------------------------
+
+batch_fgsea <- function(gene_metadata,
+                        collections_names,
+                        stats, 
+                        min_set_size = 1,
+                        max_set_size = length(stats) - 1,
+                        padj_threshold = Inf,
+                        ...) {
+  
+  # This does not make any difference: fgsea::fgsea() subsets pathways content to only the genes provided in stats
+  # gene_metadata <- gene_metadata[gene_metadata$ensembl_gene_id_version %in% names(stats),] 
+  
+  collections <- make_fgsea_pathways(gene_metadata = gene_metadata,
+                                     collections_names = collections_names)
+  
+  output <- lapply(X = names(collections),
+                   FUN = function(x) {
+                     
+                     out_i <- fgsea(pathways = collections[[x]],
+                                    stats = stats,
+                                    minSize = min_set_size,
+                                    maxSize = max_set_size,
+                                    ...)
+                     
+                     out_i <- as_tibble(out_i) %>%
+                       mutate(collection = x,
+                              n_leadingEdge = map_int(.x = leadingEdge, 
+                                                      .f = ~ length(.x)),
+                              n_leadingEdge_over_total = paste0(n_leadingEdge, " / ", size)) %>% 
+                       select(collection, set_name = pathway, everything()) %>% 
+                       filter(padj < padj_threshold) %>% 
+                       arrange(desc(NES), padj)
+                     
+                   }) %>% bind_rows()
+}
+
+# batch_ora() -------------------------------------------------------------
+
+batch_ora <- function(gene_metadata,
+                      collections_names,
+                      genes,
+                      universe,
+                      min_set_size = 1,
+                      max_set_size = length(stats) - 1,
+                      padj_threshold = Inf,
+                      ...) {
+  
+  collections <- make_fgsea_pathways(gene_metadata = gene_metadata,
+                                     collections_names = collections_names)
+  
+  output <- lapply(X = names(collections),
+                   FUN = function(x) {
+                     
+                     genes_collection_i <- gene_metadata %>% 
+                       select(ensembl_gene_id_version, all_of(x)) %>% 
+                       unnest(all_of(x), keep_empty = F)
+                     
+                     universe_i <- genes_collection_i %>% 
+                       filter(ensembl_gene_id_version %in% universe) %>% 
+                       pull(ensembl_gene_id_version) %>% 
+                       unique()
+                     
+                     genes_i <- genes_collection_i %>% 
+                       filter(ensembl_gene_id_version %in% genes) %>% 
+                       pull(ensembl_gene_id_version) %>% 
+                       unique()
+                     
+                     out_i <- fgsea::fora(pathways = collections[[x]],
+                                          genes = genes_i,
+                                          universe = universe_i,
+                                          minSize = min_set_size,
+                                          maxSize = max_set_size,
+                                          ...)
+                     
+                     out_i <- as_tibble(out_i) %>%
+                       mutate(collection = x,
+                              n_overlapGenes = paste0(overlap, " / ", size)) %>% 
+                       select(collection, set_name = pathway, everything()) %>% 
+                       filter(padj < padj_threshold) %>% 
+                       arrange(padj)
+                     
+                   }) %>% bind_rows()
+}
+
+# batch_ids2indices() -----------------------------------------------------
+
+batch_ids2indices <- function(gene_metadata,
+                              collections_names,
+                              identifiers) {
+  
+  output <- lapply(X = collections_names,
+                   FUN = function(x) {
+                     
+                     out_i <- as_tibble(gene_metadata) %>% 
+                       select(ensembl_gene_id_version, all_of(x)) %>% 
+                       unnest(all_of(x), keep_empty = F) %>%
+                       nest(data = -set_name)
+                     
+                     out_i <- setNames(object = map(.x = out_i$data,
+                                                    .f = ~ .x$ensembl_gene_id_version),
+                                       nm = out_i$set_name)
+                     
+                     out_i <- ids2indices(gene.sets = out_i, 
+                                          identifiers = identifiers, 
+                                          remove.empty = T)
+                     
+                   }) %>% setNames(nm = collections_names)
+}
+
+# batch_gseaAfterBoot() ---------------------------------------------------
+
+batch_gseaAfterBoot <- function(sca,
+                                gene_metadata,
+                                collections_names,
+                                zFit, 
+                                boots, 
+                                contrast, 
+                                min_set_size = 1, 
+                                max_set_size = dim(sca)[[1]] - 1, 
+                                padj_threshold = Inf,
+                                ...) {
+  
+  collections <- batch_ids2indices(gene_metadata = gene_metadata,
+                                   collections_names = collections_names,
+                                   identifiers = rownames(mcols(sca)))
+  
+  output <- lapply(X = names(collections),
+                   FUN = function(x) {
+                     
+                     sets <- collections[[x]]
+                     sets <- sets[map_lgl(.x = sets, .f = ~ length(.x) >= min_set_size)]
+                     sets <- sets[map_lgl(.x = sets, .f = ~ length(.x) <= max_set_size)]
+                     
+                     if(length(sets) > 1) {
+                       
+                       out_i <- gseaAfterBoot(zFit = zFit, 
+                                              boots = boots, 
+                                              sets = sets, 
+                                              hypothesis = CoefficientHypothesis(contrast),
+                                              ...) 
+                       
+                       out_i <- summary(out_i, testType = "normal") %>% 
+                         as_tibble() %>% 
+                         mutate(collection = x) %>% 
+                         select(collection, set_name = set, everything()) %>% 
+                         filter(combined_adj < padj_threshold) %>% 
+                         arrange(desc(combined_Z), combined_adj)
+                       
+                     } else {
+                       
+                       out_i <-  NULL
+                       
+                     }
+                   }) %>% bind_rows()
+}
+
+# batch_limma_gsea() ------------------------------------------------------
+
+batch_limma_gsea <- function(y,
+                             gene_metadata,
+                             collections_names,
+                             design,
+                             contrast,
+                             min_set_size = 1, 
+                             max_set_size = dim(y)[[1]] - 1, 
+                             padj_threshold = Inf,
+                             limma_test = "fry",
+                             ...) {
+  
+  message("Performing ", limma_test, " test...")
+  
+  collections <- batch_ids2indices(gene_metadata = gene_metadata,
+                                   collections_names = collections_names,
+                                   identifiers = rownames(y))
+  
+  output <- lapply(X = names(collections),
+                   FUN = function(x) {
+                     
+                     sets <- collections[[x]]
+                     sets <- sets[map_lgl(.x = sets, .f = ~ length(.x) >= min_set_size)]
+                     sets <- sets[map_lgl(.x = sets, .f = ~ length(.x) <= max_set_size)]
+                     
+                     if(length(sets) == 0) {
+                       NULL
+                     } else {
+                       out_i <- do.call(what = limma_test,
+                                        args = list(y = y,
+                                                    index = sets,
+                                                    design = design,
+                                                    contrast = contrast,
+                                                    ...))
+                       
+                       out_i <- rownames_to_column(out_i, var = "set_name") %>%
+                         as_tibble() %>%
+                         mutate(collection = x) %>%
+                         select(collection, set_name, everything()) 
+                       
+                       if("FDR" %in% colnames(out_i)) {
+                         out_i <- out_i %>% 
+                           filter(FDR < padj_threshold) %>%
+                           arrange(desc(Direction), FDR)
+                       }
+                     }
+                   }) %>% bind_rows()
+}
+
+# get_genes_in_collection() -----------------------------------------------
+
+get_genes_in_collection <- function(gene_metadata,
+                                    collection,
+                                    set_name) {
+  
+  gene_metadata %>% 
+    select(ensembl_gene_id_version, gene_name, all_of(collection)) %>% 
+    unnest(all_of(collection)) %>% 
+    filter(!!set_name == set_name) %>% 
+    mutate(collection = collection) %>% 
+    select(collection, set_name, ensembl_gene_id_version, gene_name)
+  
+}
+
+# get_leading_edge() ------------------------------------------------------
+
+get_leading_edge <- function(fgsea_df,
+                             set_name) {
+  
+  fgsea_df[fgsea_df$set_name == set_name, "leadingEdge"][[1]][[1]]
+  
+}
+
+# plot_mast_lfc() ---------------------------------------------------------
+
+plot_mast_lfc <- function(lfc_df,
+                          genes,
+                          key_genes = NULL,
+                          title = NULL,
+                          test_cond = "PFF",
+                          ref_cond = "NT",
+                          key_genes_name = "leading edge",
+                          desc_log2fc = T,
+                          xintercept = NULL) {
+  
+  lfc_df <- lfc_df %>% 
+    filter(ensembl_gene_id_version %in% genes,
+           !is.na(log2fc)) %>% 
+    mutate(fdr_value = case_when(fdr < 0.01 ~ "FDR < 0.01",
+                                 fdr < 0.05 ~ "FDR < 0.05", 
+                                 T ~ paste0("FDR ", utf8::utf8_print("\u2265"), " 0.05")),
+           fdr_color = case_when(fdr < 0.01 ~ "#e0007f",
+                                 fdr < 0.05 ~ "#b892ff", 
+                                 T ~ "#ff9100")) 
+  
+  if(!is.null(key_genes)) {
+    lfc_df <- lfc_df %>% 
+      mutate(in_key_genes = ifelse(ensembl_gene_id_version %in% key_genes, 
+                                   paste0("in ", key_genes_name),
+                                   paste0("not in ", key_genes_name)))
+  }
+  
+  out <- ggplot(data = lfc_df,
+                mapping = aes(x = log2fc,
+                              y = fct_reorder(gene_name, log2fc, .desc = desc_log2fc),
+                              fill = fdr_value)) +
+    geom_hline(yintercept = lfc_df$gene_name,
+               color = "grey", alpha = 0.2) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "#c9184a", linewidth = 0.5) +
+    geom_vline(xintercept = xintercept, linetype = "dashed", color = "orange", linewidth = 0.5) +
+    ggpubr::theme_pubr(legend = "bottom") +
+    theme(axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          legend.text = element_text(size = 14),
+          strip.text.x = element_text(size = 14)) +
+    scale_fill_manual(values = lfc_df %>% arrange(fdr) %>% pull(fdr_color) %>% unique()) +
+    labs(title = title,
+         x = paste0("log", utf8::utf8_print("\u2082"), " fold change (", test_cond, " vs ", ref_cond, ")"),
+         y = NULL,
+         fill = NULL,
+         shape = NULL)
+  
+  if(is.null(key_genes)) {
+    out +
+      geom_point(shape = 21, color = "black", size = 5, stroke = 1)
+  } else {
+    if(length(unique(lfc_df$in_key_genes)) == 2) {
+      shapes <- c(23, 21)
+    } else if(unique(lfc_df$in_key_genes) == paste0("in ", key_genes_name)) {
+      shapes <- 23
+    } else {
+      shapes <- 21
+    }
+    out +
+      geom_point(aes(shape = in_key_genes), color = "black", size = 5, stroke = 1) +
+      scale_shape_manual(values = shapes) +
+      guides(fill = guide_legend(override.aes = list(shape = 22, size = 5)))
+  }
+}
+
+# plot_mast_pct_exp() -----------------------------------------------------
+
+plot_mast_pct_exp <- function(lfc_df, genes, ref_cond, test_cond, title, fill_colors = c("#ca3767", "#5d76cb")) {
+  
+  pct_exp_df <- lfc_df %>% 
+    filter(ensembl_gene_id_version %in% genes, !is.na(log2fc)) 
+  
+  pct_exp_df <- pct_exp_df %>% 
+    mutate(gene_name = fct_relevel(gene_name, 
+                                   pct_exp_df %>% arrange(log2fc) %>% pull(gene_name)),
+           reference = 100,
+           test = (2^log2fc)*100) %>% 
+    select(ensembl_gene_id_version, gene_name, reference, test) %>% 
+    pivot_longer(cols = c(reference, test), 
+                 names_to = "condition", 
+                 values_to = "pct_expression") %>% 
+    mutate(condition = case_when(condition == "reference" ~ ref_cond,
+                                 condition == "test" ~ test_cond,
+                                 T ~ NA_character_))
+  
+  if(mean(pct_exp_df$pct_expression) < 100) {
+    out <- ggplot() +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == ref_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == test_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +  
+      scale_y_continuous(limits = c(0L, 100L), n.breaks = 10L) 
+  } else {
+    out <- ggplot() +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == test_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == ref_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +
+      scale_y_continuous(limits = c(0L, ceiling(max(pct_exp_df$pct_expression))), n.breaks = 12L) 
+  }
+  
+  out <- out +
+    ggpubr::theme_pubr(legend = "bottom") +
+    scale_color_manual(values = fill_colors, aesthetics = "fill") +
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 14),
+          legend.text = element_text(size = 14),
+          legend.title = element_blank()) +
+    ggpubr::rotate_x_text(angle = 30) +
+    labs(x = NULL,
+         y = "% expression",
+         title = title)
+  
+  out
+}
+
+# make_ggvenn_sets() ------------------------------------------------------
+
+make_ggvenn_sets <- function(fgsea_df, set_names) {
+  lapply(X = set_names,
+         FUN = function(x) {
+           get_leading_edge(fgsea_df = fgsea_df, 
+                            set_name = x)
+         }) %>% 
+    setNames(nm = set_names)
+}
+
+
+
+# search_genes_in_leading_edges() -----------------------------------------
+
+search_genes_in_leading_edges <- function(fgsea_df, 
+                                          genes, 
+                                          genes_group_name = "searched") {
+  
+  out <- fgsea_df %>% 
+    mutate(leadingEdge_searched = map(.x = leadingEdge, .f = ~ intersect(.x, genes)),
+           n_leadingEdge_searched = map_int(.x = leadingEdge_searched, .f = ~length(.x)),
+           n_leadingEdge_searched_over_leadingEdge = paste0(n_leadingEdge_searched, " / ", n_leadingEdge),
+           pct_leadingEdge_searched_in_leadingEdge = (n_leadingEdge_searched / n_leadingEdge)*100) %>% 
+    arrange(desc(pct_leadingEdge_searched_in_leadingEdge), collection) %>% 
+    mutate(set_number = seq_along(fgsea_df[[1]])) %>% 
+    rename_at(.vars = c("leadingEdge_searched", 
+                        "n_leadingEdge_searched", 
+                        "n_leadingEdge_searched_over_leadingEdge", 
+                        "pct_leadingEdge_searched_in_leadingEdge"),
+              .funs = ~ str_replace(., "searched", genes_group_name)) %>% 
+    select(set_number, everything())
+  
+}
+
+# plot_genes_prop_in_leading_edges() --------------------------------------
+
+plot_genes_prop_in_leading_edges <- function(fgsea_df, 
+                                             genes, 
+                                             x_label = "gene set",
+                                             y_label_genes_group_name = "searched") {
+  
+  out_df <- search_genes_in_leading_edges(fgsea_df = fgsea_df,
+                                          genes = genes,
+                                          genes_group_name = "searched")
+  
+  out_df <- out_df %>%
+    mutate(collection = case_when(collection == "msigdb_h" ~ "HALLMARK",
+                                  collection == "msigdb_c2_cp_kegg" ~ "KEGG",
+                                  collection == "msigdb_c2_cp_reactome" ~ "REACTOME",
+                                  collection == "msigdb_c2_cp_wikipathways" ~ "Wikipathways",
+                                  collection == "msigdb_c2_cp_biocarta" ~ "Biocarta",
+                                  collection == "msigdb_c5_gobp" ~ "GO BP"),
+           collection_color = case_when(collection == "HALLMARK" ~ "#ca3767",
+                                        collection == "KEGG" ~ "#ff6d00",
+                                        collection == "REACTOME" ~ "#5d76cb",
+                                        collection == "Wikipathways" ~ "#29a655",
+                                        collection == "Biocarta" ~ "#b370ff",
+                                        collection == "GO BP" ~ "#ffc300"))
+  
+  collection_levels <- unique(out_df$collection)
+  
+  collection_levels <- collection_levels[match(x = c("HALLMARK", "KEGG", "REACTOME", 
+                                                     "Wikipathways", "Biocarta", "GO BP"),
+                                               table = collection_levels)]
+  
+  collection_levels <- na.omit(collection_levels)
+  
+  out_df <- out_df %>% 
+    mutate(collection = fct_relevel(collection, collection_levels))
+  
+  collection_colors <- unique(out_df[, c("collection", "collection_color")])
+  
+  collection_colors <- collection_colors[match(x = collection_levels, 
+                                               table = collection_colors$collection),
+                                         "collection_color"][[1]]
+  
+  percentiles_x_pos <- c(0.25*length(out_df[[1]]),
+                         0.5*length(out_df[[1]]),
+                         0.75*length(out_df[[1]]))
+  
+  ggplot(data = out_df, 
+         mapping = aes(x = set_number,
+                       y = pct_leadingEdge_searched_in_leadingEdge)) +
+    geom_vline(xintercept = out_df$set_number, color = "grey", alpha = 0.2) +
+    geom_vline(xintercept = percentiles_x_pos, 
+               linetype = "dashed", color = "orange", linewidth = 0.5) +
+    geom_hline(yintercept = c(0, 25, 50, 75, 100), 
+               linetype = "dotted", color = "#c9184a", linewidth = 0.5) +
+    geom_label(data = tibble(x = percentiles_x_pos,
+                             y = 100,
+                             label = c("Q1", "Q2", "Q3")),
+               aes(x = x, y = y, label = label)) + 
+    geom_point(aes(fill = collection), 
+               shape = 21, color = "black", size = 3, stroke = 1, alpha = 0.8) +
+    ggpubr::theme_pubr(legend = "bottom") +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          axis.text.y = element_text(size = 14),
+          axis.title = element_text(size = 16),
+          legend.text = element_text(size = 16)) +
+    scale_y_continuous(limits = c(0L, 100L), n.breaks = 10L) +
+    scale_color_manual(values = collection_colors, aesthetics = "fill") +
+    labs(x = x_label, 
+         y = paste0("Proportion of leading edge corresponding to ", y_label_genes_group_name, " genes (%)"),
+         fill = NULL)
+}
+
+# plot_lfc() --------------------------------------------------------------
+
+plot_lfc <- function(lfc_df,
+                     genes,
+                     key_genes = NULL,
+                     title = NULL,
+                     test_cond = "test cond.",
+                     ref_cond = "ref cond.",
+                     key_genes_name = "leading edge",
+                     desc_lfc = T,
+                     xintercept = NULL,
+                     padj_lab = T,
+                     lab_nudge = 0.2,
+                     input_pkg = "MAST") {
+  
+  if(input_pkg == "MAST") {
+    lfc <- sym("log2fc")
+    fdr <- sym("fdr")
+  } else if(input_pkg == "DESeq2") {
+    lfc <- sym("log2FoldChange")
+    lfcse <- sym("lfcSE")
+    fdr <- sym("padj")
+  }
+  
+  lfc_df <- lfc_df %>% 
+    filter(ensembl_gene_id_version %in% genes,
+           !is.na(eval(lfc))) %>% 
+    mutate(fdr_value = case_when(eval(fdr) < 0.01 ~ "adj. p < 0.01",
+                                 eval(fdr) < 0.05 ~ "adj. p < 0.05", 
+                                 eval(fdr) >= 0.05 ~ paste0("adj. p ", utf8::utf8_print("\u2265"), " 0.05"),
+                                 is.na(eval(fdr)) ~ "adj. p not computed"),
+           fdr_color = case_when(eval(fdr) < 0.01 ~ "#e0007f",
+                                 eval(fdr) < 0.05 ~ "#b892ff", 
+                                 eval(fdr) >= 0.05 ~ "#ff9100",
+                                 is.na(eval(fdr)) ~ "grey"))
+  
+  if(!is.null(key_genes)) {
+    lfc_df <- lfc_df %>% 
+      mutate(in_key_genes = ifelse(ensembl_gene_id_version %in% key_genes, 
+                                   paste0("in ", key_genes_name),
+                                   paste0("not in ", key_genes_name)))
+  }
+  
+  out <- ggplot(data = lfc_df,
+                mapping = aes(x = eval(lfc),
+                              y = fct_reorder(gene_name, eval(lfc), .desc = desc_lfc),
+                              fill = fdr_value)) +
+    geom_hline(yintercept = lfc_df$gene_name,
+               color = "grey", alpha = 0.2) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "#c9184a", linewidth = 0.5) +
+    geom_vline(xintercept = xintercept, linetype = "dashed", color = "orange", linewidth = 0.5) +
+    ggpubr::theme_pubr(legend = "bottom") +
+    theme(axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          legend.text = element_text(size = 14),
+          strip.text.x = element_text(size = 14)) +
+    scale_fill_manual(values = lfc_df %>% arrange(eval(fdr)) %>% pull(fdr_color) %>% unique()) +
+    labs(title = title,
+         x = paste0("log", utf8::utf8_print("\u2082"), " fold change (", test_cond, " vs ", ref_cond, ")"),
+         y = NULL,
+         fill = NULL,
+         shape = NULL) +
+    geom_linerange(mapping = aes(xmin = eval(lfc) - eval(lfcse),
+                                 xmax = eval(lfc) + eval(lfcse))) 
+  
+  if(padj_lab) {
+    out <- out +
+      geom_text(mapping = aes(x = (eval(lfc) + eval(lfcse) + lab_nudge), 
+                              label = ifelse(is.na(eval(fdr)), "", formatC(eval(fdr), format = "e", digits = 1))),
+                hjust = 0)
+  } 
+  
+  if(!is.null(xintercept)) {
+    out <- out +
+      scale_x_continuous(breaks = c(0, xintercept))
+  }
+  
+  if(is.null(key_genes)) {
+    out <- out +
+      geom_point(shape = 21, color = "black", size = 5, stroke = 1)
+  } else {
+    if(length(unique(lfc_df$in_key_genes)) == 2) {
+      shapes <- c(23, 21)
+    } else if(unique(lfc_df$in_key_genes) == paste0("in ", key_genes_name)) {
+      shapes <- 23
+    } else {
+      shapes <- 21
+    }
+    out <- out +
+      geom_point(aes(shape = in_key_genes), color = "black", size = 5, stroke = 1) +
+      scale_shape_manual(values = shapes) +
+      guides(fill = guide_legend(override.aes = list(shape = 22, size = 5)))
+  }
+  out
+}
+
+# plot_pct_exp() ----------------------------------------------------------
+
+plot_pct_exp <- function(lfc_df, 
+                         genes, 
+                         ref_cond, 
+                         test_cond, 
+                         title, 
+                         fill_colors = c("#ca3767", "#5d76cb"), 
+                         input_pkg = "MAST") {
+  
+  if(input_pkg == "MAST") {
+    
+    lfc <- sym("log2fc")
+    
+  } else if(input_pkg == "DESeq2") {
+    
+    lfc <- sym("log2FoldChange")
+    
+  }
+  
+  pct_exp_df <- lfc_df %>% 
+    filter(ensembl_gene_id_version %in% genes, !is.na(eval(lfc))) 
+  
+  pct_exp_df <- pct_exp_df %>% 
+    mutate(gene_name = fct_relevel(gene_name, 
+                                   pct_exp_df %>% arrange(eval(lfc)) %>% pull(gene_name)),
+           reference = 100,
+           test = (2^eval(lfc))*100) %>% 
+    select(ensembl_gene_id_version, gene_name, reference, test) %>% 
+    pivot_longer(cols = c(reference, test), 
+                 names_to = "condition", 
+                 values_to = "pct_expression") %>% 
+    mutate(condition = case_when(condition == "reference" ~ ref_cond,
+                                 condition == "test" ~ test_cond,
+                                 T ~ NA_character_))
+  
+  if(mean(pct_exp_df$pct_expression) < 100) {
+    out <- ggplot() +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == ref_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == test_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +  
+      scale_y_continuous(limits = c(0L, 100L), n.breaks = 10L) 
+  } else {
+    out <- ggplot() +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == test_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +
+      geom_col(data = pct_exp_df %>%
+                 filter(condition == ref_cond),
+               mapping = aes(x = gene_name,
+                             y = pct_expression,
+                             fill = condition),
+               color = "black", position = "dodge", width = 0.9, alpha = 0.9, linewidth = 0.8) +
+      scale_y_continuous(limits = c(0L, ceiling(max(pct_exp_df$pct_expression))), n.breaks = 12L) 
+  }
+  
+  out <- out +
+    ggpubr::theme_pubr(legend = "bottom") +
+    scale_color_manual(values = fill_colors, aesthetics = "fill") +
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 14),
+          legend.text = element_text(size = 14),
+          legend.title = element_blank()) +
+    ggpubr::rotate_x_text(angle = 30) +
+    labs(x = NULL,
+         y = "% expression",
+         title = title)
+  
+  out
+}
+
+
+
+# plot_norm_counts() ------------------------------------------------------
+
+plot_norm_counts <- function(data, 
+                             title, 
+                             color = "precise_description", 
+                             cont_colors = c("#fdab01", "#f85e00", "black"),
+                             facet_var = NULL) {
+  
+  
+  if(is.null(facet_var)) {
+    split_counts <- F
+  } else {
+    split_counts <- T
+    facet_var <- sym(facet_var)
+  }
+  
+  if(split_counts) {
+    
+    p <- ggplot(data = data,
+                mapping = aes(x = mean_norm_count,
+                              y = gene_name,
+                              fill = eval(facet_var),
+                              color = eval(sym(color))))  +
+      geom_col(width = 0.8, linewidth = 1) +
+      geom_linerange(mapping = aes(xmin = mean_norm_count - sem_norm_count,
+                                   xmax = mean_norm_count + sem_norm_count)) +
+      geom_label(aes(x = 1.2, label = paste0(mean_norm_count_quartile, " - % ACTB: ", round(mean_norm_count_pct_actb, 2))), 
+                 color = "black",
+                 hjust = "left",
+                 size = 3,
+                 fill = "#e5e6e4") +
+      scale_fill_manual(values = c("#0077b6", "#a4133c", "#d3d3d3")) +
+      facet_wrap(~ eval(facet_var)) 
+    
+  } else {
+    
+    p <- ggplot(data = data,
+                mapping = aes(x = mean_norm_count,
+                              y = gene_name,
+                              color = eval(sym(color))))  +
+      geom_col(width = 0.8, linewidth = 1, fill = "#0077b6") +
+      geom_linerange(mapping = aes(xmin = mean_norm_count - sem_norm_count,
+                                   xmax = mean_norm_count + sem_norm_count)) +
+      geom_label(aes(x = 1.2, label = paste0(mean_norm_count_quartile, " - % ACTB: ", round(mean_norm_count_pct_actb, 2))), 
+                 color = "black",
+                 hjust = "left",
+                 size = 3,
+                 fill = "#0077b6")
+    
+  }
+  
+  p +
+    theme_pubr(legend = "bottom") +
+    theme(plot.title = element_text(size = 16),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          strip.text.x = element_text(size = 14),
+          legend.text = element_text(size = 14)) +
+    scale_x_log10(n.breaks = 12, labels = scales::comma) +
+    scale_color_manual(values = cont_colors) +
+    labs(x = "normalized count", 
+         y = NULL,
+         color = NULL,
+         title = title) +
+    guides(fill = "none",
+           color = guide_legend(override.aes = list(fill = "white"))) +
+    rotate_x_text(45) 
+  
+}
+
+# sample_dist_heatmap() ---------------------------------------------------
+
+sample_dist_heatmap <- function(data, labels, distance = "euclidian") {
+  
+  if(distance == "euclidian") {
+    sampleDists <- dist(t(assay(data)))
+  } else if(distance == "poisson") {
+    sampleDists <- PoissonDistance(t(counts(data)))$dd
+  }
+  sampleDistMatrix <- as.matrix(sampleDists)
+  
+  if(!is.null(labels)) {
+    if(length(labels) == 1) {
+      rownames <- data[[labels]]
+    } else {
+      rownames <- data[[labels[[1]]]]
+      for(i in labels[2:length(labels)]) {
+        rownames <- paste0(rownames, " - ", data[[i]])
+      }
+    }
+    rownames(sampleDistMatrix) <- rownames
+  }
+  colnames(sampleDistMatrix) <- NULL
+  
+  pheatmap(sampleDistMatrix,
+           clustering_distance_rows = sampleDists,
+           clustering_distance_cols = sampleDists,
+           col = colorRampPalette( rev(brewer.pal(9, "Purples")) )(255))
+  
+}
+
+# sample_dist_pca() -------------------------------------------------------
+
+sample_dist_pca <- function(data, 
+                            shape, 
+                            fill,
+                            shape_lab = NULL,
+                            fill_lab = NULL,
+                            shape_set = c(22, 21, 23), 
+                            fill_color_set = NULL,
+                            ntop = 500) {
+  
+  pca_data <- plotPCA(object = data,
+                      intgroup = c(shape, fill),
+                      ntop = ntop,
+                      returnData = T,
+                      pcsToUse = 1:2)
+  
+  pct_var <- attr(pca_data, "percentVar") * 100
+  
+  pca_plot <- ggplot(data = pca_data,
+                     mapping = aes(x = PC1, 
+                                   y = PC2,
+                                   shape = eval(sym(shape)),
+                                   fill = eval(sym(fill)))) +
+    geom_point(size = 5, color = "black") +
+    theme_pubr(legend = "right") +
+    scale_shape_manual(values = shape_set) +
+    guides(fill = guide_legend(override.aes = list(shape = shape_set[[1]]))) +
+    labs(x = paste0("PC1: ", round(pct_var[[1]], digits = 1), "% variance"),
+         y = paste0("PC2: ", round(pct_var[[2]], digits = 1), "% variance"),
+         shape = shape_lab,
+         fill = fill_lab)
+  
+  if(!is.null(fill_color_set)) {
+    pca_plot <- pca_plot +
+      scale_fill_manual(values = fill_color_set)
+  }
+  
+  pca_plot
+  
+}
+
+
+
+
+# run_pca() ---------------------------------------------------------------
+
+run_pca <- function(cnt_mtx, ntop = 500, pcs = 1:2) {
+  
+  var <- rowVars(x = cnt_mtx)
+  
+  top_var <- order(var, decreasing = T)[seq_len(min(ntop, length(var)))]
+  
+  top_mtx <- t(cnt_mtx[top_var,])
+  
+  pca <- prcomp(x = top_mtx, center = T, scale. = T)
+  
+  pct_var <- (pca$sdev^2/sum(pca$sdev^2))*100
+  
+  pct_var <- setNames(object = pct_var[pcs], nm = paste0("PC", pcs))
+  
+  pcs <- names(pct_var)
+  
+  df <- tibble(barcode = rownames(top_mtx),
+               !!pcs[[1]] := pca$x[,pcs[[1]]],
+               !!pcs[[2]] := pca$x[,pcs[[2]]])
+  
+  attr(df, "pct_var") <- pct_var
+  
+  return(df)
+  
+}
+
+# plot_mean_tpms() --------------------------------------------------------
+
+plot_mean_tpms <- function(data, 
+                           title, 
+                           x_label = "normalized count",
+                           add_geom_label = T,
+                           color = "precise_description", 
+                           cont_colors = c("#fdab01", "#f85e00", "black"),
+                           facet_var = NULL,
+                           log_compatible = F) {
+  
+  if(log_compatible) {
+    data <- data %>% 
+      mutate(mean_tpm = mean_tpm + 1)
+  }
+  
+  if(is.null(facet_var)) {
+    split_counts <- F
+  } else {
+    split_counts <- T
+    facet_var <- sym(facet_var)
+  }
+  
+  if(split_counts) {
+    
+    p <- ggplot(data = data,
+                mapping = aes(x = mean_tpm,
+                              y = gene_name,
+                              fill = eval(facet_var),
+                              color = eval(sym(color))))  +
+      geom_col(width = 0.9, linewidth = 1) +
+      geom_linerange(mapping = aes(xmin = mean_tpm - sem_tpm,
+                                   xmax = mean_tpm + sem_tpm))
+    if(add_geom_label) {
+      p <- p +
+        geom_label(aes(x = 1.2, label = paste0(mean_tpm_quartile, " - % ACTB: ", round(mean_tpm_pct_actb, 3))), 
+                   color = "black",
+                   hjust = "left",
+                   size = 4,
+                   fill = "#e5e6e4")
+    }
+    p <- p +
+      scale_fill_manual(values = c("#0077b6", "#a4133c", "#d3d3d3")) +
+      facet_wrap(~ eval(facet_var)) 
+    
+  } else {
+    
+    p <- ggplot(data = data,
+                mapping = aes(x = mean_tpm,
+                              y = gene_name,
+                              color = eval(sym(color))))  +
+      geom_col(width = 0.9, linewidth = 1, fill = "#0077b6") +
+      geom_linerange(mapping = aes(xmin = mean_tpm - sem_tpm,
+                                   xmax = mean_tpm + sem_tpm))
+    if(add_geom_label) {
+      p <- p +
+        geom_label(aes(x = 1.2, label = paste0(mean_tpm_quartile, " - % ACTB: ", round(mean_tpm_pct_actb, 3))), 
+                   color = "black",
+                   hjust = "left",
+                   size = 4,
+                   fill = "#0077b6")
+    }
+    
+  }
+  
+  p +
+    theme_pubr(legend = "bottom") +
+    theme(plot.title = element_text(size = 18),
+          axis.text.x = element_text(size = 14),
+          axis.text.y = element_text(size = 14),
+          axis.title.x = element_text(size = 16),
+          strip.text.x = element_text(size = 14),
+          legend.text = element_text(size = 14)) +
+    scale_x_log10(n.breaks = 12, labels = scales::comma) +
+    scale_color_manual(values = cont_colors) +
+    labs(x = x_label, 
+         y = NULL,
+         color = NULL,
+         title = title) +
+    guides(fill = "none",
+           color = guide_legend(override.aes = list(fill = "white"))) +
+    rotate_x_text(45) 
+  
+} 
