@@ -574,7 +574,8 @@ batch_fgsea <- function(gene_metadata,
                        mutate(collection = x,
                               n_leadingEdge = map_int(.x = leadingEdge, 
                                                       .f = ~ length(.x)),
-                              n_leadingEdge_over_total = paste0(n_leadingEdge, " / ", size)) %>% 
+                              n_leadingEdge_over_total = paste0(n_leadingEdge, " / ", size),
+                              pct_leadingEdge = (n_leadingEdge / size) * 100) %>% 
                        select(collection, set_name = pathway, everything()) %>% 
                        filter(padj < padj_threshold) %>% 
                        arrange(desc(NES), padj)
@@ -622,7 +623,8 @@ batch_ora <- function(gene_metadata,
                      
                      out_i <- as_tibble(out_i) %>%
                        mutate(collection = x,
-                              n_overlapGenes = paste0(overlap, " / ", size)) %>% 
+                              n_overlapGenes = paste0(overlap, " / ", size),
+                              pct_overlapGenes = (overlap / size) * 100) %>% 
                        select(collection, set_name = pathway, everything()) %>% 
                        filter(padj < padj_threshold) %>% 
                        arrange(padj)
@@ -1032,10 +1034,12 @@ plot_lfc <- function(lfc_df,
                      xintercept = NULL,
                      padj_lab = T,
                      lab_nudge = 0.2,
-                     input_pkg = "MAST") {
+                     input_pkg = "MAST",
+                     lfcse_to_log2 = T) {
   
   if(input_pkg == "MAST") {
     lfc <- sym("log2fc")
+    lfcse <- sym("lfcse")
     fdr <- sym("fdr")
   } else if(input_pkg == "DESeq2") {
     lfc <- sym("log2FoldChange")
@@ -1048,12 +1052,27 @@ plot_lfc <- function(lfc_df,
            !is.na(eval(lfc))) %>% 
     mutate(fdr_value = case_when(eval(fdr) < 0.01 ~ "adj. p < 0.01",
                                  eval(fdr) < 0.05 ~ "adj. p < 0.05", 
-                                 eval(fdr) >= 0.05 ~ paste0("adj. p ", utf8::utf8_print("\u2265"), " 0.05"),
+                                 eval(fdr) < 0.1 ~ "adj. p < 0.1", 
+                                 eval(fdr) >= 0.1 ~ paste0("adj. p ", utf8::utf8_print("\u2265"), " 0.1"),
                                  is.na(eval(fdr)) ~ "adj. p not computed"),
            fdr_color = case_when(eval(fdr) < 0.01 ~ "#e0007f",
                                  eval(fdr) < 0.05 ~ "#b892ff", 
-                                 eval(fdr) >= 0.05 ~ "#ff9100",
+                                 eval(fdr) < 0.1 ~ "#29a655",
+                                 eval(fdr) >= 0.1 ~ "#ff9100",
                                  is.na(eval(fdr)) ~ "grey"))
+  
+  if(input_pkg == "MAST") {
+    
+    if(lfcse_to_log2) {
+      lfc_df <- lfc_df %>% 
+        mutate(ci.hi = ci.hi / log(x = 2, base = exp(1)),
+               ci.lo = ci.lo / log(x = 2, base = exp(1)))
+    }
+    
+    lfc_df <- lfc_df %>% 
+      mutate(lfcse = (ci.hi - ci.lo) / 3.92)
+    
+  }
   
   if(!is.null(key_genes)) {
     lfc_df <- lfc_df %>% 
@@ -1150,7 +1169,8 @@ plot_pct_exp <- function(lfc_df,
                  values_to = "pct_expression") %>% 
     mutate(condition = case_when(condition == "reference" ~ ref_cond,
                                  condition == "test" ~ test_cond,
-                                 T ~ NA_character_))
+                                 T ~ NA_character_) %>% 
+             fct_relevel(c(ref_cond, test_cond)))
   
   if(mean(pct_exp_df$pct_expression) < 100) {
     out <- ggplot() +
@@ -1366,9 +1386,7 @@ run_pca <- function(cnt_mtx, ntop = 500, pcs = 1:2) {
   
   pcs <- names(pct_var)
   
-  df <- tibble(barcode = rownames(top_mtx),
-               !!pcs[[1]] := pca$x[,pcs[[1]]],
-               !!pcs[[2]] := pca$x[,pcs[[2]]])
+  df <- as_tibble(x = pca$x[,pcs], rownames = "barcode")
   
   attr(df, "pct_var") <- pct_var
   
@@ -1460,3 +1478,21 @@ plot_mean_tpms <- function(data,
     rotate_x_text(45) 
   
 } 
+
+# set_level_color() -------------------------------------------------------
+
+set_level_color <- function(data, column, levels, colors) {
+  
+  factor_color <- tibble(factor = as_factor(x = levels),
+                         color = as_factor(x = colors))
+  
+  filtered_factor_color <- factor_color %>% 
+    dplyr::filter(factor %in% unique(data[[column]])) %>% 
+    mutate(across(.cols = everything(), .fns = fct_drop))
+  
+  data <- data %>% 
+    mutate(!!column := fct_relevel(eval(sym(column)), levels(filtered_factor_color$factor))) %>%
+    left_join(filtered_factor_color, by = join_by(!!sym(column) == factor)) %>% 
+    dplyr::rename(!!paste0(column, "_color") := color)
+  
+}
