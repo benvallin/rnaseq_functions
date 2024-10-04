@@ -1496,3 +1496,26 @@ set_level_color <- function(data, column, levels, colors) {
     dplyr::rename(!!paste0(column, "_color") := color)
   
 }
+
+# split_splici_txi() ------------------------------------------------------
+
+split_splici_txi <- function(txi, split_df) {
+  
+  out <- lapply(
+    X = c("abundance", "counts", "length"),
+    FUN = function(layer) {
+      
+      se <- SummarizedExperiment::SummarizedExperiment(assays = setNames(object = list(txi[[layer]]), nm = layer))
+      
+      txis <- tximeta::splitSE(se = se, splitDf = split_df, assayName = layer)
+      
+      setNames(object = list(SummarizedExperiment::assay(txis, colnames(split_df)[[1]]),
+                             SummarizedExperiment::assay(txis, colnames(split_df)[[2]])),
+               nm = c(colnames(split_df)[[1]], colnames(split_df)[[2]]))
+      
+    }) 
+  
+  out <- setNames(object = c(out, txi$countsFromAbundance), 
+                  nm = c("abundance", "counts", "length", "countsFromAbundance"))
+  
+}
