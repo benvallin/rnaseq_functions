@@ -1365,9 +1365,6 @@ sample_dist_pca <- function(data,
   
 }
 
-
-
-
 # run_pca() ---------------------------------------------------------------
 
 run_pca <- function(cnt_mtx, ntop = 500, pcs = 1:2) {
@@ -1398,12 +1395,12 @@ run_pca <- function(cnt_mtx, ntop = 500, pcs = 1:2) {
 
 plot_mean_tpms <- function(data, 
                            title, 
-                           x_label = "normalized count",
+                           x_label = "mean TPM",
                            add_geom_label = T,
-                           color = "precise_description", 
-                           cont_colors = c("#fdab01", "#f85e00", "black"),
+                           color = "precise_protein_description", 
+                           cont_colors = c("#5d76cb", "#ff9e00", "#29a655", "#ca3767", "#38a3a5"),
                            facet_var = NULL,
-                           log_compatible = F) {
+                           log_compatible = T) {
   
   if(log_compatible) {
     data <- data %>% 
@@ -1445,7 +1442,7 @@ plot_mean_tpms <- function(data,
                 mapping = aes(x = mean_tpm,
                               y = gene_name,
                               color = eval(sym(color))))  +
-      geom_col(width = 0.9, linewidth = 1, fill = "#0077b6") +
+      geom_col(width = 0.9, linewidth = 1, fill = "#c0c0c0", alpha = 0.9) +
       geom_linerange(mapping = aes(xmin = mean_tpm - sem_tpm,
                                    xmax = mean_tpm + sem_tpm))
     if(add_geom_label) {
@@ -1454,7 +1451,7 @@ plot_mean_tpms <- function(data,
                    color = "black",
                    hjust = "left",
                    size = 4,
-                   fill = "#0077b6")
+                   fill = "#e5e6e4")
     }
     
   }
@@ -1467,15 +1464,98 @@ plot_mean_tpms <- function(data,
           axis.title.x = element_text(size = 16),
           strip.text.x = element_text(size = 14),
           legend.text = element_text(size = 14)) +
-    scale_x_log10(n.breaks = 12, labels = scales::comma) +
+    scale_x_log10(n.breaks = 8) +
     scale_color_manual(values = cont_colors) +
     labs(x = x_label, 
          y = NULL,
          color = NULL,
          title = title) +
     guides(fill = "none",
-           color = guide_legend(override.aes = list(fill = "white"))) +
-    rotate_x_text(45) 
+           color = guide_legend(override.aes = list(fill = "white")))
+  
+} 
+
+# plot_mean_tpms2() -------------------------------------------------------
+
+plot_mean_tpms2 <- function(data, 
+                            title, 
+                            x_label = "mean TPM",
+                            add_geom_label = T,
+                            include_pct_actb = F,
+                            color = NULL, 
+                            cont_colors = c("#5d76cb", "#ff9e00", "#29a655", "#ca3767", "#38a3a5"),
+                            log_compatible = T) {
+  
+  if(log_compatible) {
+    
+    data <- data %>% 
+      mutate(mean_tpm = mean_tpm + 1)
+    
+  }
+  
+  if(is.null(color)) {
+    
+    p <- ggplot(data = data,
+                mapping = aes(x = mean_tpm,
+                              y = gene_name))  +
+      geom_col(width = 0.9, linewidth = 1, fill = "#5d76cb", alpha = 0.9, color = "black") +
+      geom_linerange(mapping = aes(xmin = mean_tpm - sem_tpm,
+                                   xmax = mean_tpm + sem_tpm))
+    
+  } else {
+    
+    p <- ggplot(data = data,
+                mapping = aes(x = mean_tpm,
+                              y = gene_name,
+                              color = eval(sym(color))))  +
+      geom_col(width = 0.9, linewidth = 1, fill = "#c0c0c0", alpha = 0.9) +
+      geom_linerange(mapping = aes(xmin = mean_tpm - sem_tpm,
+                                   xmax = mean_tpm + sem_tpm))
+    
+  }
+  
+  if(add_geom_label) {
+    
+    if(include_pct_actb) {
+      
+      p <- p +
+        geom_label(aes(x = 1.2, 
+                       label = paste0(mean_tpm_quartile, " - % ACTB: ", round(mean_tpm_pct_actb, 3))), 
+                   color = "black",
+                   hjust = "left",
+                   size = 4,
+                   fill = "#e5e6e4")
+      
+    } else {
+      
+      p <- p +
+        geom_label(aes(x = 1.2, 
+                       label = mean_tpm_quartile), 
+                   color = "black",
+                   hjust = "left",
+                   size = 4,
+                   fill = "#e5e6e4")
+      
+    }
+    
+  }
+  
+  p +
+    theme_pubr(legend = "bottom") +
+    theme(plot.title = element_text(size = 18),
+          axis.text.x = element_text(size = 14),
+          axis.text.y = element_text(size = 14),
+          axis.title.x = element_text(size = 16),
+          strip.text.x = element_text(size = 14),
+          legend.text = element_text(size = 14)) +
+    scale_x_log10(n.breaks = 8) +
+    scale_color_manual(values = cont_colors) +
+    labs(x = x_label, 
+         y = NULL,
+         color = NULL,
+         title = title) +
+    guides(fill = "none",
+           color = guide_legend(override.aes = list(fill = "white")))
   
 } 
 
